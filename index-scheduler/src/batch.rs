@@ -897,91 +897,95 @@ impl IndexScheduler {
                 dump_tasks.flush()?;
 
                 // 3. Dump the indexes
-                self.index_mapper.try_for_each_index(&rtxn, |uid, index| -> Result<()> {
-                    let rtxn = index.read_txn()?;
-                    let metadata = IndexMetadata {
-                        uid: uid.to_owned(),
-                        primary_key: index.primary_key(&rtxn)?.map(String::from),
-                        created_at: index.created_at(&rtxn)?,
-                        updated_at: index.updated_at(&rtxn)?,
-                    };
-                    let mut index_dumper = dump.create_index(uid, &metadata)?;
+                let () =
+                    self.index_mapper.try_for_each_index(&rtxn, |uid, index| -> Result<()> {
+                        let rtxn = index.read_txn()?;
+                        let metadata = IndexMetadata {
+                            uid: uid.to_owned(),
+                            primary_key: index.primary_key(&rtxn)?.map(String::from),
+                            created_at: index.created_at(&rtxn)?,
+                            updated_at: index.updated_at(&rtxn)?,
+                        };
+                        let mut index_dumper = dump.create_index(uid, &metadata)?;
 
-                    let fields_ids_map = index.fields_ids_map(&rtxn)?;
-                    let all_fields: Vec<_> = fields_ids_map.iter().map(|(id, _)| id).collect();
-                    let embedding_configs = index.embedding_configs(&rtxn)?;
+                        let fields_ids_map = index.fields_ids_map(&rtxn)?;
+                        let all_fields: Vec<_> = fields_ids_map.iter().map(|(id, _)| id).collect();
+                        let embedding_configs = index.embedding_configs(&rtxn)?;
 
-                    // 3.1. Dump the documents
-                    for ret in index.all_documents(&rtxn)? {
-                        if self.must_stop_processing.get() {
-                            return Err(Error::AbortedTask);
-                        }
-
-                        let (id, doc) = ret?;
-
-                        let mut document = milli::obkv_to_json(&all_fields, &fields_ids_map, doc)?;
-
-                        'inject_vectors: {
-                            let embeddings = index.embeddings(&rtxn, id)?;
-
-                            if embeddings.is_empty() {
-                                break 'inject_vectors;
+                        // 3.1. Dump the documents
+                        for ret in index.all_documents(&rtxn)? {
+                            if self.must_stop_processing.get() {
+                                return Err(Error::AbortedTask);
                             }
 
-                            let vectors = document
-                                .entry(RESERVED_VECTORS_FIELD_NAME.to_owned())
-                                .or_insert(serde_json::Value::Object(Default::default()));
+                            let (id, doc) = ret?;
 
-                            let serde_json::Value::Object(vectors) = vectors else {
-                                return Err(milli::Error::UserError(
-                                    milli::UserError::InvalidVectorsMapType {
-                                        document_id: {
-                                            if let Ok(Some(Ok(index))) = index
-                                                .external_id_of(&rtxn, std::iter::once(id))
-                                                .map(|it| it.into_iter().next())
-                                            {
-                                                index
-                                            } else {
-                                                format!("internal docid={id}")
-                                            }
+                            let mut document =
+                                milli::obkv_to_json(&all_fields, &fields_ids_map, doc)?;
+
+                            'inject_vectors: {
+                                let embeddings = index.embeddings(&rtxn, id)?;
+
+                                if embeddings.is_empty() {
+                                    break 'inject_vectors;
+                                }
+
+                                let vectors = document
+                                    .entry(RESERVED_VECTORS_FIELD_NAME.to_owned())
+                                    .or_insert(serde_json::Value::Object(Default::default()));
+
+                                let serde_json::Value::Object(vectors) = vectors else {
+                                    return Err(milli::Error::UserError(
+                                        milli::UserError::InvalidVectorsMapType {
+                                            document_id: {
+                                                if let Ok(Some(Ok(index))) = index
+                                                    .external_id_of(&rtxn, std::iter::once(id))
+                                                    .map(|it| it.into_iter().next())
+                                                {
+                                                    index
+                                                } else {
+                                                    format!("internal docid={id}")
+                                                }
+                                            },
+                                            value: vectors.clone(),
                                         },
-                                        value: vectors.clone(),
-                                    },
-                                )
-                                .into());
-                            };
-
-                            for (embedder_name, embeddings) in embeddings {
-                                let user_provided = embedding_configs
-                                    .iter()
-                                    .find(|conf| conf.name == embedder_name)
-                                    .is_some_and(|conf| conf.user_provided.contains(id));
-
-                                let embeddings = ExplicitVectors {
-                                    embeddings: Some(
-                                        VectorOrArrayOfVectors::from_array_of_vectors(embeddings),
-                                    ),
-                                    regenerate: !user_provided,
+                                    )
+                                    .into());
                                 };
-                                vectors.insert(
-                                    embedder_name,
-                                    serde_json::to_value(embeddings).unwrap(),
-                                );
+
+                                for (embedder_name, embeddings) in embeddings {
+                                    let user_provided = embedding_configs
+                                        .iter()
+                                        .find(|conf| conf.name == embedder_name)
+                                        .is_some_and(|conf| conf.user_provided.contains(id));
+
+                                    let embeddings = ExplicitVectors {
+                                        embeddings: Some(
+                                            VectorOrArrayOfVectors::from_array_of_vectors(
+                                                embeddings,
+                                            ),
+                                        ),
+                                        regenerate: !user_provided,
+                                    };
+                                    vectors.insert(
+                                        embedder_name,
+                                        serde_json::to_value(embeddings).unwrap(),
+                                    );
+                                }
                             }
+
+                            index_dumper.push_document(&document)?;
                         }
 
-                        index_dumper.push_document(&document)?;
-                    }
-
-                    // 3.2. Dump the settings
-                    let settings = meilisearch_types::settings::settings(
-                        index,
-                        &rtxn,
-                        meilisearch_types::settings::SecretPolicy::RevealSecrets,
-                    )?;
-                    index_dumper.settings(&settings)?;
-                    Ok(())
-                })?;
+                        // 3.2. Dump the settings
+                        let settings = meilisearch_types::settings::settings(
+                            index,
+                            &rtxn,
+                            meilisearch_types::settings::SecretPolicy::RevealSecrets,
+                        )?;
+                        index_dumper.settings(&settings)?;
+                        Ok(())
+                    })?;
 
                 // 4. Dump experimental feature settings
                 let features = self.features().runtime_features();
@@ -1288,7 +1292,11 @@ impl IndexScheduler {
                     }
                 }
 
-                let config = IndexDocumentsConfig { update_method: method, ..Default::default() };
+                let config = IndexDocumentsConfig {
+                    update_method: method,
+                    compute_prefix_databases: self.compute_prefix_databases,
+                    ..Default::default()
+                };
 
                 let embedder_configs = index.embedding_configs(index_wtxn)?;
                 // TODO: consider Arc'ing the map too (we only need read access + we'll be cloning it multiple times, so really makes sense)
@@ -1398,6 +1406,7 @@ impl IndexScheduler {
                 let deleted_documents = delete_document_by_filter(
                     index_wtxn,
                     filter,
+                    self.compute_prefix_databases,
                     self.index_mapper.indexer_config(),
                     self.must_stop_processing.clone(),
                     index,
@@ -1638,6 +1647,7 @@ impl IndexScheduler {
 fn delete_document_by_filter<'a>(
     wtxn: &mut RwTxn<'a>,
     filter: &serde_json::Value,
+    compute_prefix_databases: bool,
     indexer_config: &IndexerConfig,
     must_stop_processing: MustStopProcessing,
     index: &'a Index,
@@ -1653,6 +1663,7 @@ fn delete_document_by_filter<'a>(
 
         let config = IndexDocumentsConfig {
             update_method: IndexDocumentsMethod::ReplaceDocuments,
+            compute_prefix_databases,
             ..Default::default()
         };
 
