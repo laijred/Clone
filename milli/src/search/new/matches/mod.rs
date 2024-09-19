@@ -94,14 +94,57 @@ impl FormatOptions {
 }
 
 #[derive(Clone, Debug)]
+pub enum MatchPosition {
+    Word {
+        // position of the word in the whole text.
+        word_position: usize,
+        // position of the token in the whole text.
+        token_position: usize,
+    },
+    Phrase {
+        // position of the first and last word in the phrase in the whole text.
+        word_positions: (usize, usize),
+        // position of the first and last token in the phrase in the whole text.
+        token_positions: (usize, usize),
+    },
+}
+
+#[derive(Clone, Debug)]
 pub struct Match {
     match_len: usize,
     // ids of the query words that matches.
     ids: Vec<WordId>,
-    // position of the word in the whole text.
-    word_position: usize,
-    // position of the token in the whole text.
-    token_position: usize,
+    position: MatchPosition,
+}
+
+impl Match {
+    fn get_first_word_pos(&self) -> usize {
+        match self.position {
+            MatchPosition::Word { word_position, .. } => word_position,
+            MatchPosition::Phrase { word_positions: (fwp, _), .. } => fwp,
+        }
+    }
+
+    fn get_last_word_pos(&self) -> usize {
+        match self.position {
+            MatchPosition::Word { word_position, .. } => word_position,
+            MatchPosition::Phrase { word_positions: (_, lwp), .. } => lwp,
+        }
+    }
+
+    fn get_first_token_pos(&self) -> usize {
+        match self.position {
+            MatchPosition::Word { token_position, .. } => token_position,
+            MatchPosition::Phrase { token_positions: (ftp, _), .. } => ftp,
+        }
+    }
+
+    fn get_last_token_pos(&self) -> usize {
+        match self.position {
+            MatchPosition::Word { token_position, .. } => token_position,
+            MatchPosition::Phrase { token_positions: (_, ltp), .. } => ltp,
+        }
+    }
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
@@ -130,41 +173,27 @@ impl<'t, 'tokenizer> Matcher<'t, 'tokenizer, '_, '_> {
         /// compute_partial_match peek into next words to validate if the match is complete.
         fn compute_partial_match<'a>(
             mut partial: PartialMatch<'a>,
-            token_position: usize,
-            word_position: usize,
+            first_token_position: usize,
+            first_word_position: usize,
+            first_word_char_start: &usize,
             words_positions: &mut impl Iterator<Item = (usize, usize, &'a Token<'a>)>,
             matches: &mut Vec<Match>,
         ) -> bool {
-            let mut potential_matches = vec![(token_position, word_position, partial.char_len())];
-
             for (token_position, word_position, word) in words_positions {
                 partial = match partial.match_token(word) {
                     // token matches the partial match, but the match is not full,
                     // we temporarily save the current token then we try to match the next one.
-                    Some(MatchType::Partial(partial)) => {
-                        potential_matches.push((token_position, word_position, partial.char_len()));
-                        partial
-                    }
+                    Some(MatchType::Partial(partial)) => partial,
                     // partial match is now full, we keep this matches and we advance positions
-                    Some(MatchType::Full { char_len, ids }) => {
-                        let ids: Vec<_> = ids.clone().collect();
-                        // save previously matched tokens as matches.
-                        let iter = potential_matches.into_iter().map(
-                            |(token_position, word_position, match_len)| Match {
-                                match_len,
-                                ids: ids.clone(),
-                                word_position,
-                                token_position,
-                            },
-                        );
-                        matches.extend(iter);
-
+                    Some(MatchType::Full { ids, .. }) => {
                         // save the token that closes the partial match as a match.
                         matches.push(Match {
-                            match_len: char_len,
-                            ids,
-                            word_position,
-                            token_position,
+                            match_len: word.char_end - *first_word_char_start,
+                            ids: ids.clone().collect(),
+                            position: MatchPosition::Phrase {
+                                word_positions: (first_word_position, word_position),
+                                token_positions: (first_token_position, token_position),
+                            },
                         });
 
                         // the match is complete, we return true.
@@ -207,8 +236,7 @@ impl<'t, 'tokenizer> Matcher<'t, 'tokenizer, '_, '_> {
                         matches.push(Match {
                             match_len: char_len,
                             ids,
-                            word_position,
-                            token_position,
+                            position: MatchPosition::Word { word_position, token_position },
                         });
                         break;
                     }
@@ -221,6 +249,7 @@ impl<'t, 'tokenizer> Matcher<'t, 'tokenizer, '_, '_> {
                             partial,
                             token_position,
                             word_position,
+                            &word.char_start,
                             &mut wp,
                             &mut matches,
                         ) {
@@ -243,7 +272,7 @@ impl<'t, 'tokenizer> Matcher<'t, 'tokenizer, '_, '_> {
             Some((tokens, matches)) => matches
                 .iter()
                 .map(|m| MatchBounds {
-                    start: tokens[m.token_position].byte_start,
+                    start: tokens[m.get_first_token_pos()].byte_start,
                     length: m.match_len,
                 })
                 .collect(),
@@ -258,10 +287,12 @@ impl<'t, 'tokenizer> Matcher<'t, 'tokenizer, '_, '_> {
         crop_size: usize,
     ) -> (usize, usize) {
         // if there is no match, we start from the beginning of the string by default.
-        let first_match_word_position = matches.first().map(|m| m.word_position).unwrap_or(0);
-        let first_match_token_position = matches.first().map(|m| m.token_position).unwrap_or(0);
-        let last_match_word_position = matches.last().map(|m| m.word_position).unwrap_or(0);
-        let last_match_token_position = matches.last().map(|m| m.token_position).unwrap_or(0);
+        let first_match_word_position =
+            matches.first().map(|m| m.get_first_word_pos()).unwrap_or(0);
+        let first_match_token_position =
+            matches.first().map(|m| m.get_first_token_pos()).unwrap_or(0);
+        let last_match_word_position = matches.last().map(|m| m.get_last_word_pos()).unwrap_or(0);
+        let last_match_token_position = matches.last().map(|m| m.get_last_token_pos()).unwrap_or(0);
 
         // matches needs to be counted in the crop len.
         let mut remaining_words = crop_size + first_match_word_position - last_match_word_position;
@@ -356,6 +387,20 @@ impl<'t, 'tokenizer> Matcher<'t, 'tokenizer, '_, '_> {
         let mut order_score = 0;
         let mut distance_score = 0;
 
+        // count score for phrases
+        fn tally_phrase_scores(
+            fwp: &usize,
+            lwp: &usize,
+            order_score: &mut i16,
+            distance_score: &mut i16,
+        ) {
+            let words_in_phrase_minus_one = (lwp - fwp) as i16;
+            // will always be ordered, so +1 for each space between words
+            *order_score += words_in_phrase_minus_one;
+            // distance will always be 1, so -1 for each space between words
+            *distance_score -= words_in_phrase_minus_one;
+        }
+
         let mut iter = matches.iter().peekable();
         while let Some(m) = iter.next() {
             if let Some(next_match) = iter.peek() {
@@ -364,8 +409,24 @@ impl<'t, 'tokenizer> Matcher<'t, 'tokenizer, '_, '_> {
                     order_score += 1;
                 }
 
+                let m_last_word_pos = match m.position {
+                    MatchPosition::Word { word_position, .. } => word_position,
+                    MatchPosition::Phrase { word_positions: (fwp, lwp), .. } => {
+                        tally_phrase_scores(&fwp, &lwp, &mut order_score, &mut distance_score);
+                        lwp
+                    }
+                };
+
+                let next_match_first_word_pos = match next_match.position {
+                    MatchPosition::Word { word_position, .. } => word_position,
+                    MatchPosition::Phrase { word_positions: (fwp, _), .. } => fwp,
+                };
+
                 // compute distance between matches
-                distance_score -= (next_match.word_position - m.word_position).min(7) as i16;
+                distance_score -= (next_match_first_word_pos - m_last_word_pos).min(7) as i16;
+            } else if let MatchPosition::Phrase { word_positions: (fwp, lwp), .. } = m.position {
+                // in case last match is a phrase, count score for its words
+                tally_phrase_scores(&fwp, &lwp, &mut order_score, &mut distance_score);
             }
 
             ids.extend(m.ids.iter());
@@ -393,7 +454,11 @@ impl<'t, 'tokenizer> Matcher<'t, 'tokenizer, '_, '_> {
                 // if next match would make interval gross more than crop_size,
                 // we compare the current interval with the best one,
                 // then we increase `interval_first` until next match can be added.
-                if next_match.word_position - matches[interval_first].word_position >= crop_size {
+                let next_match_last_word_pos = next_match.get_last_word_pos();
+                let mut interval_first_match_first_word_pos =
+                    matches[interval_first].get_first_word_pos();
+
+                if next_match_last_word_pos - interval_first_match_first_word_pos >= crop_size {
                     let interval_score =
                         self.match_interval_score(&matches[interval_first..=interval_last]);
 
@@ -404,10 +469,16 @@ impl<'t, 'tokenizer> Matcher<'t, 'tokenizer, '_, '_> {
                     }
 
                     // advance start of the interval while interval is longer than crop_size.
-                    while next_match.word_position - matches[interval_first].word_position
-                        >= crop_size
-                    {
+                    loop {
                         interval_first += 1;
+                        interval_first_match_first_word_pos =
+                            matches[interval_first].get_first_word_pos();
+
+                        if next_match_last_word_pos - interval_first_match_first_word_pos
+                            < crop_size
+                        {
+                            break;
+                        }
                     }
                 }
                 interval_last = index;
@@ -456,31 +527,41 @@ impl<'t, 'tokenizer> Matcher<'t, 'tokenizer, '_, '_> {
                     if format_options.highlight {
                         // insert highlight markers around matches.
                         for m in matches {
-                            let token = &tokens[m.token_position];
+                            let (current_byte_start, current_byte_end) = match m.position {
+                                MatchPosition::Word { token_position, .. } => {
+                                    let token = &tokens[token_position];
+                                    (&token.byte_start, &token.byte_end)
+                                }
+                                MatchPosition::Phrase { token_positions: (ftp, ltp), .. } => {
+                                    (&tokens[ftp].byte_start, &tokens[ltp].byte_end)
+                                }
+                            };
 
                             // skip matches out of the crop window.
-                            if token.byte_start < byte_start || token.byte_end > byte_end {
+                            if *current_byte_start < byte_start || *current_byte_end > byte_end {
                                 continue;
                             }
 
-                            if byte_index < token.byte_start {
-                                formatted.push(&self.text[byte_index..token.byte_start]);
+                            if byte_index < *current_byte_start {
+                                formatted.push(&self.text[byte_index..*current_byte_start]);
                             }
 
-                            let highlight_byte_index = self.text[token.byte_start..]
+                            let highlight_byte_index = self.text[*current_byte_start..]
                                 .char_indices()
                                 .enumerate()
                                 .find(|(i, _)| *i == m.match_len)
-                                .map_or(token.byte_end, |(_, (i, _))| i + token.byte_start);
+                                .map_or(*current_byte_end, |(_, (i, _))| i + *current_byte_start);
+
                             formatted.push(self.highlight_prefix);
-                            formatted.push(&self.text[token.byte_start..highlight_byte_index]);
+                            formatted.push(&self.text[*current_byte_start..highlight_byte_index]);
                             formatted.push(self.highlight_suffix);
+
                             // if it's a prefix highlight, we put the end of the word after the highlight marker.
-                            if highlight_byte_index < token.byte_end {
-                                formatted.push(&self.text[highlight_byte_index..token.byte_end]);
+                            if highlight_byte_index < *current_byte_end {
+                                formatted.push(&self.text[highlight_byte_index..*current_byte_end]);
                             }
 
-                            byte_index = token.byte_end;
+                            byte_index = *current_byte_end;
                         }
                     }
 
@@ -821,22 +902,24 @@ mod tests {
     fn format_highlight_crop_phrase_query() {
         //! testing: https://github.com/meilisearch/meilisearch/issues/3975
         let temp_index = TempIndex::new();
+
+        let text = "The groundbreaking invention had the power to split the world between those who embraced progress and those who resisted change!";
         temp_index
             .add_documents(documents!([
-                { "id": 1, "text": "The groundbreaking invention had the power to split the world between those who embraced progress and those who resisted change!" }
+                { "id": 1, "text": text }
             ]))
             .unwrap();
+
         let rtxn = temp_index.read_txn().unwrap();
 
         let format_options = FormatOptions { highlight: true, crop: Some(10) };
-        let text = "The groundbreaking invention had the power to split the world between those who embraced progress and those who resisted change!";
 
         let builder = MatcherBuilder::new_test(&rtxn, &temp_index, "\"the world\"");
         let mut matcher = builder.build(text, None);
         // should return 10 words with a marker at the start as well the end, and the highlighted matches.
         insta::assert_snapshot!(
             matcher.format(format_options),
-            @"…had the power to split <em>the</em> <em>world</em> between those who…"
+            @"…the power to split <em>the world</em> between those who embraced…"
         );
 
         let builder = MatcherBuilder::new_test(&rtxn, &temp_index, "those \"and those\"");
@@ -844,7 +927,40 @@ mod tests {
         // should highlight "those" and the phrase "and those".
         insta::assert_snapshot!(
             matcher.format(format_options),
-            @"…world between <em>those</em> who embraced progress <em>and</em> <em>those</em> who resisted…"
+            @"…world between <em>those</em> who embraced progress <em>and those</em> who resisted…"
+        );
+
+        let builder = MatcherBuilder::new_test(
+            &rtxn,
+            &temp_index,
+            "\"The groundbreaking invention had the power to split the world\"",
+        );
+        let mut matcher = builder.build(text, None);
+        insta::assert_snapshot!(
+            matcher.format(format_options),
+            @"<em>The groundbreaking invention had the power to split the world</em>…"
+        );
+
+        let builder = MatcherBuilder::new_test(
+            &rtxn,
+            &temp_index,
+            "\"The groundbreaking invention had the power to split the world between\"",
+        );
+        let mut matcher = builder.build(text, None);
+        insta::assert_snapshot!(
+            matcher.format(format_options),
+            @"The groundbreaking invention had the power to split the world …"
+        );
+
+        let builder = MatcherBuilder::new_test(
+            &rtxn,
+            &temp_index,
+            "\"The groundbreaking invention\" \"embraced progress and those who resisted change\"",
+        );
+        let mut matcher = builder.build(text, None);
+        insta::assert_snapshot!(
+            matcher.format(format_options),
+            @"…between those who <em>embraced progress and those who resisted change</em>…"
         );
     }
 
@@ -900,7 +1016,7 @@ mod tests {
         let mut matcher = builder.build(text, None);
         insta::assert_snapshot!(
             matcher.format(format_options),
-            @"_the_ _do_ _or_ die can't be he do and or isn'_t_ _he_"
+            @"_the_ _do or_ die can't be he do and or isn'_t he_"
         );
     }
 }
