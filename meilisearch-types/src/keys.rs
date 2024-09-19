@@ -2,10 +2,11 @@ use std::convert::Infallible;
 use std::hash::Hash;
 use std::str::FromStr;
 
-use deserr::{DeserializeError, Deserr, MergeWithError, ValuePointerRef};
+use bitflags::bitflags;
+use deserr::{take_cf_content, DeserializeError, Deserr, MergeWithError, ValuePointerRef};
 use enum_iterator::Sequence;
 use milli::update::Setting;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use time::format_description::well_known::Rfc3339;
 use time::macros::{format_description, time};
 use time::{Date, OffsetDateTime, PrimitiveDateTime};
@@ -179,114 +180,101 @@ fn parse_expiration_date(
     }
 }
 
-#[derive(Copy, Clone, Serialize, Deserialize, Debug, Eq, PartialEq, Hash, Sequence, Deserr)]
-#[repr(u8)]
-pub enum Action {
-    #[serde(rename = "*")]
-    #[deserr(rename = "*")]
-    All = 0,
-    #[serde(rename = "search")]
-    #[deserr(rename = "search")]
-    Search,
-    #[serde(rename = "documents.*")]
-    #[deserr(rename = "documents.*")]
-    DocumentsAll,
-    #[serde(rename = "documents.add")]
-    #[deserr(rename = "documents.add")]
-    DocumentsAdd,
-    #[serde(rename = "documents.get")]
-    #[deserr(rename = "documents.get")]
-    DocumentsGet,
-    #[serde(rename = "documents.delete")]
-    #[deserr(rename = "documents.delete")]
-    DocumentsDelete,
-    #[serde(rename = "indexes.*")]
-    #[deserr(rename = "indexes.*")]
-    IndexesAll,
-    #[serde(rename = "indexes.create")]
-    #[deserr(rename = "indexes.create")]
-    IndexesAdd,
-    #[serde(rename = "indexes.get")]
-    #[deserr(rename = "indexes.get")]
-    IndexesGet,
-    #[serde(rename = "indexes.update")]
-    #[deserr(rename = "indexes.update")]
-    IndexesUpdate,
-    #[serde(rename = "indexes.delete")]
-    #[deserr(rename = "indexes.delete")]
-    IndexesDelete,
-    #[serde(rename = "indexes.swap")]
-    #[deserr(rename = "indexes.swap")]
-    IndexesSwap,
-    #[serde(rename = "tasks.*")]
-    #[deserr(rename = "tasks.*")]
-    TasksAll,
-    #[serde(rename = "tasks.cancel")]
-    #[deserr(rename = "tasks.cancel")]
-    TasksCancel,
-    #[serde(rename = "tasks.delete")]
-    #[deserr(rename = "tasks.delete")]
-    TasksDelete,
-    #[serde(rename = "tasks.get")]
-    #[deserr(rename = "tasks.get")]
-    TasksGet,
-    #[serde(rename = "settings.*")]
-    #[deserr(rename = "settings.*")]
-    SettingsAll,
-    #[serde(rename = "settings.get")]
-    #[deserr(rename = "settings.get")]
-    SettingsGet,
-    #[serde(rename = "settings.update")]
-    #[deserr(rename = "settings.update")]
-    SettingsUpdate,
-    #[serde(rename = "stats.*")]
-    #[deserr(rename = "stats.*")]
-    StatsAll,
-    #[serde(rename = "stats.get")]
-    #[deserr(rename = "stats.get")]
-    StatsGet,
-    #[serde(rename = "metrics.*")]
-    #[deserr(rename = "metrics.*")]
-    MetricsAll,
-    #[serde(rename = "metrics.get")]
-    #[deserr(rename = "metrics.get")]
-    MetricsGet,
-    #[serde(rename = "dumps.*")]
-    #[deserr(rename = "dumps.*")]
-    DumpsAll,
-    #[serde(rename = "dumps.create")]
-    #[deserr(rename = "dumps.create")]
-    DumpsCreate,
-    #[serde(rename = "snapshots.*")]
-    #[deserr(rename = "snapshots.*")]
-    SnapshotsAll,
-    #[serde(rename = "snapshots.create")]
-    #[deserr(rename = "snapshots.create")]
-    SnapshotsCreate,
-    #[serde(rename = "version")]
-    #[deserr(rename = "version")]
-    Version,
-    #[serde(rename = "keys.create")]
-    #[deserr(rename = "keys.create")]
-    KeysAdd,
-    #[serde(rename = "keys.get")]
-    #[deserr(rename = "keys.get")]
-    KeysGet,
-    #[serde(rename = "keys.update")]
-    #[deserr(rename = "keys.update")]
-    KeysUpdate,
-    #[serde(rename = "keys.delete")]
-    #[deserr(rename = "keys.delete")]
-    KeysDelete,
-    #[serde(rename = "experimental.get")]
-    #[deserr(rename = "experimental.get")]
-    ExperimentalFeaturesGet,
-    #[serde(rename = "experimental.update")]
-    #[deserr(rename = "experimental.update")]
-    ExperimentalFeaturesUpdate,
+bitflags! {
+    #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
+    #[repr(transparent)]
+    pub struct Action: u8 {
+    const All = 0;
+    const Search = 1;
+    const DocumentsAll = 2;
+    const DocumentsAdd = 3;
+    const DocumentsGet = 4;
+    const DocumentsDelete = 5;
+    const IndexesAll = 6;
+    const IndexesAdd = 7;
+    const IndexesGet = 8;
+    const IndexesUpdate = 9;
+    const IndexesDelete = 10;
+    const IndexesSwap = 11;
+    const TasksAll = 12;
+    const TasksCancel = 13;
+    const TasksDelete = 14;
+    const TasksGet = 15;
+    const SettingsAll = 16;
+    const SettingsGet = 17;
+    const SettingsUpdate = 18;
+    const StatsAll = 19;
+    const StatsGet = 20;
+    const MetricsAll = 21;
+    const MetricsGet = 22;
+    const DumpsAll = 23;
+    const DumpsCreate = 24;
+    const SnapshotsAll = 25;
+    const SnapshotsCreate = 26;
+    const Version = 27;
+    const KeysAdd = 28;
+    const KeysGet = 29;
+    const KeysUpdate = 30;
+    const KeysDelete = 31;
+    const ExperimentalFeaturesGet = 32;
+    const ExperimentalFeaturesUpdate = 33;
+    }
 }
 
 impl Action {
+    const SERDE_MAP_ARR: [(&'static str, Self); 34] = [
+        ("*", Self::All),
+        ("search", Self::Search),
+        ("documents.*", Self::DocumentsAll),
+        ("documents.add", Self::DocumentsAdd),
+        ("documents.get", Self::DocumentsGet),
+        ("documents.delete", Self::DocumentsDelete),
+        ("indexes.*", Self::IndexesAll),
+        ("indexes.create", Self::IndexesAdd),
+        ("indexes.get", Self::IndexesGet),
+        ("indexes.update", Self::IndexesUpdate),
+        ("indexes.delete", Self::IndexesDelete),
+        ("indexes.swap", Self::IndexesSwap),
+        ("tasks.*", Self::TasksAll),
+        ("tasks.cancel", Self::TasksCancel),
+        ("tasks.delete", Self::TasksDelete),
+        ("tasks.get", Self::TasksGet),
+        ("settings.*", Self::SettingsAll),
+        ("settings.get", Self::SettingsGet),
+        ("settings.update", Self::SettingsUpdate),
+        ("stats.*", Self::StatsAll),
+        ("stats.get", Self::StatsGet),
+        ("metrics.*", Self::MetricsAll),
+        ("metrics.get", Self::MetricsGet),
+        ("dumps.*", Self::DumpsAll),
+        ("dumps.create", Self::DumpsCreate),
+        ("snapshots.*", Self::SnapshotsAll),
+        ("snapshots.create", Self::SnapshotsCreate),
+        ("version", Self::Version),
+        ("keys.create", Self::KeysAdd),
+        ("keys.get", Self::KeysGet),
+        ("keys.update", Self::KeysUpdate),
+        ("keys.delete", Self::KeysDelete),
+        ("experimental.get", Self::ExperimentalFeaturesGet),
+        ("experimental.update", Self::ExperimentalFeaturesUpdate),
+    ];
+
+    fn get_action(v: &str) -> Option<Action> {
+        Self::SERDE_MAP_ARR
+            .iter()
+            .find(|(serde_name, _)| &v == serde_name)
+            .map(|(_, action)| *action)
+    }
+
+    fn get_action_serde_name(v: &Action) -> &'static str {
+        Self::SERDE_MAP_ARR
+            .iter()
+            .find(|(_, action)| v == action)
+            .map(|(serde_name, _)| serde_name)
+            // actions should always have matching serialized values
+            .unwrap()
+    }
+
     pub const fn from_repr(repr: u8) -> Option<Self> {
         use actions::*;
         match repr {
@@ -328,44 +316,140 @@ impl Action {
     }
 
     pub const fn repr(&self) -> u8 {
-        *self as u8
+        self.bits()
+    }
+}
+
+impl<E: DeserializeError> Deserr<E> for Action {
+    fn deserialize_from_value<V: deserr::IntoValue>(
+        value: deserr::Value<V>,
+        location: deserr::ValuePointerRef<'_>,
+    ) -> Result<Self, E> {
+        match value {
+            deserr::Value::String(s) => match Self::get_action(&s) {
+                Some(action) => Ok(action),
+                None => Err(deserr::take_cf_content(E::error::<std::convert::Infallible>(
+                    None,
+                    deserr::ErrorKind::UnknownValue {
+                        value: &s,
+                        accepted: &Self::SERDE_MAP_ARR.map(|(ser_action, _)| ser_action),
+                    },
+                    location,
+                ))),
+            },
+            _ => Err(take_cf_content(E::error(
+                None,
+                deserr::ErrorKind::IncorrectValueKind {
+                    actual: value,
+                    accepted: &[deserr::ValueKind::String],
+                },
+                location,
+            ))),
+        }
+    }
+}
+
+impl Serialize for Action {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(Self::get_action_serde_name(self))
+    }
+}
+
+impl<'de> Deserialize<'de> for Action {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Action;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(formatter, "the name of a valid action (string)")
+            }
+
+            fn visit_str<E>(self, s: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                match Self::Value::get_action(s) {
+                    Some(action) => Ok(action),
+                    None => Err(E::invalid_value(serde::de::Unexpected::Str(s), &"a valid action")),
+                }
+            }
+        }
+
+        deserializer.deserialize_str(Visitor)
+    }
+}
+
+impl Sequence for Action {
+    const CARDINALITY: usize = Self::SERDE_MAP_ARR.len();
+
+    fn next(&self) -> Option<Self> {
+        let next_index = self.bits() as usize + 1;
+        if next_index == Self::CARDINALITY {
+            None
+        } else {
+            Some(Self::SERDE_MAP_ARR[next_index].1)
+        }
+    }
+
+    fn previous(&self) -> Option<Self> {
+        let current_index = self.bits() as usize;
+        if current_index == 0 {
+            None
+        } else {
+            Some(Self::SERDE_MAP_ARR[current_index - 1].1)
+        }
+    }
+
+    fn first() -> Option<Self> {
+        Some(Self::SERDE_MAP_ARR[0].1)
+    }
+
+    fn last() -> Option<Self> {
+        Some(Self::SERDE_MAP_ARR[Self::CARDINALITY - 1].1)
     }
 }
 
 pub mod actions {
-    use super::Action::*;
+    use super::Action as A;
 
-    pub(crate) const ALL: u8 = All.repr();
-    pub const SEARCH: u8 = Search.repr();
-    pub const DOCUMENTS_ALL: u8 = DocumentsAll.repr();
-    pub const DOCUMENTS_ADD: u8 = DocumentsAdd.repr();
-    pub const DOCUMENTS_GET: u8 = DocumentsGet.repr();
-    pub const DOCUMENTS_DELETE: u8 = DocumentsDelete.repr();
-    pub const INDEXES_ALL: u8 = IndexesAll.repr();
-    pub const INDEXES_CREATE: u8 = IndexesAdd.repr();
-    pub const INDEXES_GET: u8 = IndexesGet.repr();
-    pub const INDEXES_UPDATE: u8 = IndexesUpdate.repr();
-    pub const INDEXES_DELETE: u8 = IndexesDelete.repr();
-    pub const INDEXES_SWAP: u8 = IndexesSwap.repr();
-    pub const TASKS_ALL: u8 = TasksAll.repr();
-    pub const TASKS_CANCEL: u8 = TasksCancel.repr();
-    pub const TASKS_DELETE: u8 = TasksDelete.repr();
-    pub const TASKS_GET: u8 = TasksGet.repr();
-    pub const SETTINGS_ALL: u8 = SettingsAll.repr();
-    pub const SETTINGS_GET: u8 = SettingsGet.repr();
-    pub const SETTINGS_UPDATE: u8 = SettingsUpdate.repr();
-    pub const STATS_ALL: u8 = StatsAll.repr();
-    pub const STATS_GET: u8 = StatsGet.repr();
-    pub const METRICS_ALL: u8 = MetricsAll.repr();
-    pub const METRICS_GET: u8 = MetricsGet.repr();
-    pub const DUMPS_ALL: u8 = DumpsAll.repr();
-    pub const DUMPS_CREATE: u8 = DumpsCreate.repr();
-    pub const SNAPSHOTS_CREATE: u8 = SnapshotsCreate.repr();
-    pub const VERSION: u8 = Version.repr();
-    pub const KEYS_CREATE: u8 = KeysAdd.repr();
-    pub const KEYS_GET: u8 = KeysGet.repr();
-    pub const KEYS_UPDATE: u8 = KeysUpdate.repr();
-    pub const KEYS_DELETE: u8 = KeysDelete.repr();
-    pub const EXPERIMENTAL_FEATURES_GET: u8 = ExperimentalFeaturesGet.repr();
-    pub const EXPERIMENTAL_FEATURES_UPDATE: u8 = ExperimentalFeaturesUpdate.repr();
+    pub(crate) const ALL: u8 = A::All.repr();
+    pub const SEARCH: u8 = A::Search.repr();
+    pub const DOCUMENTS_ALL: u8 = A::DocumentsAll.repr();
+    pub const DOCUMENTS_ADD: u8 = A::DocumentsAdd.repr();
+    pub const DOCUMENTS_GET: u8 = A::DocumentsGet.repr();
+    pub const DOCUMENTS_DELETE: u8 = A::DocumentsDelete.repr();
+    pub const INDEXES_ALL: u8 = A::IndexesAll.repr();
+    pub const INDEXES_CREATE: u8 = A::IndexesAdd.repr();
+    pub const INDEXES_GET: u8 = A::IndexesGet.repr();
+    pub const INDEXES_UPDATE: u8 = A::IndexesUpdate.repr();
+    pub const INDEXES_DELETE: u8 = A::IndexesDelete.repr();
+    pub const INDEXES_SWAP: u8 = A::IndexesSwap.repr();
+    pub const TASKS_ALL: u8 = A::TasksAll.repr();
+    pub const TASKS_CANCEL: u8 = A::TasksCancel.repr();
+    pub const TASKS_DELETE: u8 = A::TasksDelete.repr();
+    pub const TASKS_GET: u8 = A::TasksGet.repr();
+    pub const SETTINGS_ALL: u8 = A::SettingsAll.repr();
+    pub const SETTINGS_GET: u8 = A::SettingsGet.repr();
+    pub const SETTINGS_UPDATE: u8 = A::SettingsUpdate.repr();
+    pub const STATS_ALL: u8 = A::StatsAll.repr();
+    pub const STATS_GET: u8 = A::StatsGet.repr();
+    pub const METRICS_ALL: u8 = A::MetricsAll.repr();
+    pub const METRICS_GET: u8 = A::MetricsGet.repr();
+    pub const DUMPS_ALL: u8 = A::DumpsAll.repr();
+    pub const DUMPS_CREATE: u8 = A::DumpsCreate.repr();
+    pub const SNAPSHOTS_CREATE: u8 = A::SnapshotsCreate.repr();
+    pub const VERSION: u8 = A::Version.repr();
+    pub const KEYS_CREATE: u8 = A::KeysAdd.repr();
+    pub const KEYS_GET: u8 = A::KeysGet.repr();
+    pub const KEYS_UPDATE: u8 = A::KeysUpdate.repr();
+    pub const KEYS_DELETE: u8 = A::KeysDelete.repr();
+    pub const EXPERIMENTAL_FEATURES_GET: u8 = A::ExperimentalFeaturesGet.repr();
+    pub const EXPERIMENTAL_FEATURES_UPDATE: u8 = A::ExperimentalFeaturesUpdate.repr();
 }
