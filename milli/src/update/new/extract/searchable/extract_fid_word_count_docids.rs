@@ -7,7 +7,7 @@ use super::SearchableExtractor;
 use crate::update::new::extract::cache::CboCachedSorter;
 use crate::update::new::DocumentChange;
 use crate::update::MergeDeladdCboRoaringBitmaps;
-use crate::{FieldId, GlobalFieldsIdsMap, Index, Result};
+use crate::{FieldId, FieldsIdsMap, GlobalFieldsIdsMap, Index, Result};
 
 const MAX_COUNTED_WORDS: usize = 30;
 
@@ -31,6 +31,7 @@ impl SearchableExtractor for FidWordCountDocidsExtractor {
         index: &Index,
         document_tokenizer: &DocumentTokenizer,
         fields_ids_map: &mut GlobalFieldsIdsMap,
+        db_fields_ids_map: &FieldsIdsMap,
         cached_sorter: &mut CboCachedSorter<MergeDeladdCboRoaringBitmaps>,
         document_change: DocumentChange,
     ) -> Result<()> {
@@ -43,7 +44,7 @@ impl SearchableExtractor for FidWordCountDocidsExtractor {
                     Ok(())
                 };
                 document_tokenizer.tokenize_document(
-                    inner.current(rtxn, index)?.unwrap(),
+                    &inner.current(rtxn, index, db_fields_ids_map)?.unwrap(),
                     fields_ids_map,
                     &mut token_fn,
                 )?;
@@ -66,7 +67,7 @@ impl SearchableExtractor for FidWordCountDocidsExtractor {
                     Ok(())
                 };
                 document_tokenizer.tokenize_document(
-                    inner.current(rtxn, index)?.unwrap(),
+                    &inner.current(rtxn, index, db_fields_ids_map)?.unwrap(),
                     fields_ids_map,
                     &mut token_fn,
                 )?;
@@ -78,7 +79,11 @@ impl SearchableExtractor for FidWordCountDocidsExtractor {
                         .or_insert((0, 1));
                     Ok(())
                 };
-                document_tokenizer.tokenize_document(inner.new(), fields_ids_map, &mut token_fn)?;
+                document_tokenizer.tokenize_document(
+                    &inner.new(rtxn, index, db_fields_ids_map)?,
+                    fields_ids_map,
+                    &mut token_fn,
+                )?;
 
                 // Only the fields that have a change in the number of words are updated.
                 for (fid, (current_count, new_count)) in fid_word_count.iter() {
@@ -100,7 +105,11 @@ impl SearchableExtractor for FidWordCountDocidsExtractor {
                     fid_word_count.entry(fid).and_modify(|count| *count += 1).or_insert(1);
                     Ok(())
                 };
-                document_tokenizer.tokenize_document(inner.new(), fields_ids_map, &mut token_fn)?;
+                document_tokenizer.tokenize_document(
+                    &inner.new(),
+                    fields_ids_map,
+                    &mut token_fn,
+                )?;
 
                 // The docids of the documents that have a number of words in a given field equal to or under than MAX_COUNTED_WORDS are stored.
                 for (fid, count) in fid_word_count.iter() {
