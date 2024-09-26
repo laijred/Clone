@@ -18,7 +18,7 @@ use super::{StdResult, TopLevelMap};
 use crate::documents::{PrimaryKey, DEFAULT_PRIMARY_KEY};
 use crate::update::new::channel::ExtractorSender;
 use crate::update::GrenadParameters;
-use crate::{FieldsIdsMap, GlobalFieldsIdsMap, Index, Result, UserError};
+use crate::{Error, FieldsIdsMap, GlobalFieldsIdsMap, Index, Result, UserError};
 
 mod document_deletion;
 mod document_operation;
@@ -32,7 +32,12 @@ pub trait DocumentChanges<'p> {
         self,
         fields_ids_map: &mut FieldsIdsMap,
         param: Self::Parameter,
-    ) -> Result<impl IndexedParallelIterator<Item = Result<DocumentChange>> + Clone + 'p>;
+    ) -> Result<
+        impl IndexedParallelIterator<
+                Item = std::result::Result<DocumentChange, Option<crate::Error>>,
+            > + Clone
+            + 'p,
+    >;
 }
 
 /// This is the main function of this crate.
@@ -48,7 +53,9 @@ pub fn index<PI>(
     document_changes: PI,
 ) -> Result<()>
 where
-    PI: IndexedParallelIterator<Item = Result<DocumentChange>> + Send + Clone,
+    PI: IndexedParallelIterator<Item = std::result::Result<DocumentChange, Option<Error>>>
+        + Send
+        + Clone,
 {
     let (merger_sender, writer_receiver) = merger_writer_channel(10_000);
     // This channel acts as a rendezvous point to ensure that we are one task ahead
